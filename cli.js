@@ -163,6 +163,34 @@ function groupFor(abs, cat, roots) {
   return { key: '99', label: 'Other' };
 }
 
+function fileInfo(abs, roots) {
+  const name = path.basename(abs);
+  const cat = categorize(abs, name);
+  if (!cat) return null;
+  let st;
+  try { st = fs.statSync(abs); } catch (e) { return null; }
+  const g = groupFor(abs, cat, roots);
+  const root = ownerRoot(abs, roots);
+  return {
+    path: abs,
+    name: name,
+    rel: root ? path.relative(root, abs) : abs,
+    category: cat,
+    group: g.label,
+    groupKey: g.key,
+    size: st.size,
+    mtime: st.mtimeMs,
+  };
+}
+
+function sortFiles(files) {
+  files.sort((a, b) => {
+    if (a.groupKey !== b.groupKey) return a.groupKey < b.groupKey ? -1 : 1;
+    return a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0;
+  });
+  return files;
+}
+
 function scan(roots) {
   const found = [];
   const visited = new Set();
@@ -189,32 +217,14 @@ function scan(roots) {
         visited.add(real);
         walk(full);
       } else if (isFile) {
-        const cat = categorize(full, e.name);
-        if (!cat) continue;
-        let st;
-        try { st = fs.statSync(full); } catch (err) { continue; }
-        const g = groupFor(full, cat, roots);
-        const root = ownerRoot(full, roots);
-        found.push({
-          path: full,
-          name: e.name,
-          rel: root ? path.relative(root, full) : full,
-          category: cat,
-          group: g.label,
-          groupKey: g.key,
-          size: st.size,
-          mtime: st.mtimeMs,
-        });
+        const info = fileInfo(full, roots);
+        if (info) found.push(info);
       }
     }
   }
 
   for (const r of roots) walk(r);
-
-  found.sort((a, b) => {
-    if (a.groupKey !== b.groupKey) return a.groupKey < b.groupKey ? -1 : 1;
-    return a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0;
-  });
+  sortFiles(found);
 
   const allow = new Set(found.map((f) => f.path));
   return { files: found, allow };
@@ -246,6 +256,7 @@ function backupExisting(abs) {
 
 function makeServer(opts) {
   let cache = null;
+  const trash = new Map(); // path -> { content, backup } for undo of deletes
   function ensure(rescan) {
     if (!cache || rescan) cache = scan(opts.roots);
     return cache;
@@ -321,6 +332,49 @@ function makeServer(opts) {
         const entry = c.files.find((f) => f.path === p);
         if (entry) { entry.size = st.size; entry.mtime = st.mtimeMs; }
         return json(res, 200, { ok: true, size: st.size, mtime: st.mtimeMs, backup });
+      }
+
+      if (req.method === 'POST' && u.pathname === '/api/delete') {
+        const raw = await readBody(req);
+        let payload;
+        try { payload = JSON.parse(raw); } catch (e) { return json(res, 400, { error: 'invalid json' }); }
+        const p = payload && payload.path;
+        if (!p) return json(res, 400, { error: 'path required' });
+        const c = ensure(false);
+        if (!c.allow.has(p)) return json(res, 403, { error: 'not an editable memory file' });
+        let content;
+        try { content = fs.readFileSync(p, 'utf8'); }
+        catch (e) { return json(res, 500, { error: String(e.message || e) }); }
+        const backup = backupExisting(p); // always back up deletes, even with --no-backup
+        try { fs.unlinkSync(p); }
+        catch (e) { return json(res, 500, { error: String(e.message || e) }); }
+        trash.set(p, { content, backup });
+        c.allow.delete(p);
+        const idx = c.files.findIndex((f) => f.path === p);
+        if (idx >= 0) c.files.splice(idx, 1);
+        return json(res, 200, { ok: true, path: p, backup });
+      }
+
+      if (req.method === 'POST' && u.pathname === '/api/restore') {
+        const raw = await readBody(req);
+        let payload;
+        try { payload = JSON.parse(raw); } catch (e) { return json(res, 400, { error: 'invalid json' }); }
+        const p = payload && payload.path;
+        if (!p || !trash.has(p)) return json(res, 404, { error: 'nothing to restore for that path' });
+        const entry = trash.get(p);
+        try {
+          fs.mkdirSync(path.dirname(p), { recursive: true });
+          fs.writeFileSync(p, entry.content, 'utf8');
+        } catch (e) { return json(res, 500, { error: String(e.message || e) }); }
+        trash.delete(p);
+        const c = ensure(false);
+        c.allow.add(p);
+        const info = fileInfo(p, opts.roots);
+        if (info && !c.files.some((f) => f.path === p)) {
+          c.files.push(info);
+          sortFiles(c.files);
+        }
+        return json(res, 200, { ok: true, path: p });
       }
 
       return json(res, 404, { error: 'not found' });
@@ -480,6 +534,19 @@ const PAGE = `<!doctype html>
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(-2px); }
   .toast.ok { border-color: #234634; }
   .toast.err { border-color: #5a2a26; color: #f0b3ad; }
+  button.ghost.danger { color: var(--danger); }
+  button.ghost.danger:hover { border-color: #5a2a26; }
+  .snackbar { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%) translateY(8px);
+    display: none; align-items: center; gap: 14px; background: var(--panel2);
+    border: 1px solid var(--border); padding: 9px 10px 9px 16px; border-radius: 10px;
+    box-shadow: 0 10px 34px rgba(0,0,0,.45); opacity: 0;
+    transition: opacity .15s, transform .15s; z-index: 50; }
+  .snackbar.show { display: flex; opacity: 1; transform: translateX(-50%) translateY(0); }
+  .snackbar .smsg { font-size: 13px; }
+  .snackbar .smsg b { color: var(--text); }
+  .snackbar button { padding: 4px 12px; }
+  .snackbar .undo { background: var(--accent); color: #1a1206; border-color: var(--accent); font-weight: 600; }
+  .snackbar .sx { background: transparent; border: 0; color: var(--muted); padding: 4px 8px; font-size: 14px; }
   .kbd { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted);
     border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
   @media (max-width: 720px) { aside { width: 44%; } .preview { display: none; } }
@@ -512,6 +579,7 @@ const PAGE = `<!doctype html>
         <div class="meta" id="curmeta"></div>
       </div>
       <button class="ghost" id="revert" title="Discard unsaved changes">Revert</button>
+      <button class="ghost danger" id="delete" title="Delete this file (undo available)">Delete</button>
     </div>
     <div class="ed-body" id="edbody">
       <div class="empty" id="empty">Select a memory file on the left to edit it.</div>
@@ -519,6 +587,11 @@ const PAGE = `<!doctype html>
   </section>
 </main>
 <div class="toast" id="toast"></div>
+<div class="snackbar" id="snack">
+  <span class="smsg" id="snackMsg"></span>
+  <button class="undo" id="snackUndo">Undo</button>
+  <button class="sx" id="snackClose" title="Dismiss">✕</button>
+</div>
 
 <script>
 (function () {
@@ -756,8 +829,68 @@ const PAGE = `<!doctype html>
     if (showPreview) updatePreview();
   }
 
+  var undoTimer = null;
+  function showUndo(name, path) {
+    var m = el("snackMsg");
+    m.textContent = "Deleted ";
+    var b = document.createElement("b");
+    b.textContent = name;
+    m.appendChild(b);
+    el("snack").classList.add("show");
+    el("snackUndo").onclick = function () { hideUndo(); restore(path); };
+    clearTimeout(undoTimer);
+    undoTimer = setTimeout(hideUndo, 12000);
+  }
+  function hideUndo() {
+    clearTimeout(undoTimer);
+    el("snack").classList.remove("show");
+  }
+
+  function deleteCurrent() {
+    if (!current) return;
+    var f = current;
+    var label = f.category === "memory" ? f.name : f.rel;
+    el("delete").disabled = true;
+    fetch("/api/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: f.path }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        el("delete").disabled = false;
+        if (d.error) { toast(d.error, "err"); return; }
+        current = null;
+        savedContent = "";
+        setDirty(false);
+        edHead.style.display = "none";
+        edBody.innerHTML = '<div class="empty">Select a memory file on the left to edit it.</div>';
+        load(false);
+        showUndo(label, f.path);
+      })
+      .catch(function (e) { el("delete").disabled = false; toast(String(e), "err"); });
+  }
+
+  function restore(path) {
+    fetch("/api/restore", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: path }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) { toast(d.error, "err"); return; }
+        load(false).then(function () {
+          var f = files.filter(function (x) { return x.path === path; })[0];
+          if (f) selectFile(f);
+        });
+        toast("Restored", "ok");
+      })
+      .catch(function (e) { toast(String(e), "err"); });
+  }
+
   function load(rescan) {
-    fetch("/api/files" + (rescan ? "?rescan=1" : ""))
+    return fetch("/api/files" + (rescan ? "?rescan=1" : ""))
       .then(function (r) { return r.json(); })
       .then(function (d) {
         files = d.files || [];
@@ -774,6 +907,8 @@ const PAGE = `<!doctype html>
   // events
   el("save").addEventListener("click", save);
   el("revert").addEventListener("click", revert);
+  el("delete").addEventListener("click", deleteCurrent);
+  el("snackClose").addEventListener("click", hideUndo);
   el("rescan").addEventListener("click", function () { load(true); });
   el("filter").addEventListener("input", renderList);
   el("collapseAll").addEventListener("click", function () {
