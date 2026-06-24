@@ -223,11 +223,24 @@ function scan(roots) {
     }
   }
 
-  for (const r of roots) walk(r);
-  sortFiles(found);
+  for (const r of roots) {
+    // Seed each root into `visited` so nested roots (e.g. ~ and ~/.claude)
+    // don't discover the overlapping files twice.
+    let real;
+    try { real = fs.realpathSync(r); } catch (e) { continue; }
+    if (visited.has(real)) continue;
+    visited.add(real);
+    walk(r);
+  }
 
-  const allow = new Set(found.map((f) => f.path));
-  return { files: found, allow };
+  // Defensive: an identical path must never appear twice (it would make the UI
+  // highlight two rows at once and double-count).
+  const seen = new Set();
+  const unique = found.filter((f) => (seen.has(f.path) ? false : (seen.add(f.path), true)));
+  sortFiles(unique);
+
+  const allow = new Set(unique.map((f) => f.path));
+  return { files: unique, allow };
 }
 
 // ---------------------------------------------------------------------------
