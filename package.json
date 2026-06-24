@@ -1,0 +1,40 @@
+{
+  "name": "claude-memory-editor",
+  "version": "0.1.0",
+  "description": "Tiny zero-dependency web app to browse and edit all your Claude Code memory files (CLAUDE.md + ~/.claude memory) across every project.",
+  "bin": {
+    "claude-memory-editor": "cli.js",
+    "cme": "cli.js"
+  },
+  "type": "commonjs",
+  "main": "cli.js",
+  "files": [
+    "cli.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node cli.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "memory",
+    "CLAUDE.md",
+    "anthropic",
+    "editor"
+  ],
+  "license": "MIT",
+  "author": "Pascal Temel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PascalTemel/claude-memory-editor.git"
+  },
+  "homepage": "https://github.com/PascalTemel/claude-memory-editor#readme",
+  "bugs": {
+    "url": "https://github.com/PascalTemel/claude-memory-editor/issues"
+  }
+}
