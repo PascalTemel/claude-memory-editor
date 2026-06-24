@@ -514,6 +514,10 @@ const PAGE = `<!doctype html>
   .badge.project { color: var(--green); border-color: #234634; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; visibility: hidden; }
   .item.dirty .dot { visibility: visible; }
+  .item .del { flex: none; border: 0; background: transparent; color: var(--muted);
+    font-size: 12px; line-height: 1; padding: 2px 5px; border-radius: 5px; cursor: pointer; opacity: 0; }
+  .item:hover .del { opacity: .6; }
+  .item .del:hover { opacity: 1; color: var(--danger); background: rgba(229,100,90,.14); }
   section.editor { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .ed-head { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
     border-bottom: 1px solid var(--border); background: var(--panel); }
@@ -705,9 +709,14 @@ const PAGE = `<!doctype html>
         item.innerHTML =
           '<span class="dot"></span>' +
           '<span class="nm">' + escapeHtml(label) + "</span>" +
-          '<span class="badge ' + f.category + '">' + (f.category === "memory" ? "mem" : "md") + "</span>";
+          '<span class="badge ' + f.category + '">' + (f.category === "memory" ? "mem" : "md") + "</span>" +
+          '<button class="del" title="Delete (undo available)">✕</button>';
         item.title = f.path;
         item.addEventListener("click", function () { selectFile(f); });
+        item.querySelector(".del").addEventListener("click", function (e) {
+          e.stopPropagation();
+          deleteFile(f);
+        });
         listEl.appendChild(item);
       });
     });
@@ -859,11 +868,9 @@ const PAGE = `<!doctype html>
     el("snack").classList.remove("show");
   }
 
-  function deleteCurrent() {
-    if (!current) return;
-    var f = current;
+  function deleteFile(f) {
+    if (!f) return;
     var label = f.category === "memory" ? f.name : f.rel;
-    el("delete").disabled = true;
     fetch("/api/delete", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -871,18 +878,20 @@ const PAGE = `<!doctype html>
     })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        el("delete").disabled = false;
         if (d.error) { toast(d.error, "err"); return; }
-        current = null;
-        savedContent = "";
-        setDirty(false);
-        edHead.style.display = "none";
-        edBody.innerHTML = '<div class="empty">Select a memory file on the left to edit it.</div>';
+        if (current && current.path === f.path) {
+          current = null;
+          savedContent = "";
+          setDirty(false);
+          edHead.style.display = "none";
+          edBody.innerHTML = '<div class="empty">Select a memory file on the left to edit it.</div>';
+        }
         load(false);
         showUndo(label, f.path);
       })
-      .catch(function (e) { el("delete").disabled = false; toast(String(e), "err"); });
+      .catch(function (e) { toast(String(e), "err"); });
   }
+  function deleteCurrent() { deleteFile(current); }
 
   function restore(path) {
     fetch("/api/restore", {
